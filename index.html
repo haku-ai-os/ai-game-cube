@@ -87,6 +87,9 @@
     .btn{display:inline-grid;place-items:center;min-height:52px;padding:0 22px;border-radius:999px;background:linear-gradient(135deg,#22e4ff,#79ffae);color:#06101c;font-weight:950;box-shadow:0 0 22px rgba(53,232,255,.36);cursor:pointer}
     .btn.secondary{background:linear-gradient(135deg,#ffdf70,#ff62cf)}
     .btn.ghost{background:rgba(255,255,255,.06);color:#eaf3ff;border:1px solid rgba(255,255,255,.16)}
+    .mute-btn{position:fixed;top:10px;right:12px;z-index:30;width:42px;height:42px;border-radius:50%;border:1px solid rgba(123,230,255,.42);background:linear-gradient(145deg,rgba(22,36,67,.94),rgba(9,13,27,.92));color:#cfefff;font-size:18px;line-height:1;display:grid;place-items:center;cursor:pointer;box-shadow:0 0 16px rgba(53,232,255,.28),inset 0 0 12px rgba(53,232,255,.1);-webkit-tap-highlight-color:transparent}
+    .mute-btn:active{transform:scale(.94)}
+    .mute-btn.off{opacity:.62;filter:grayscale(.5)}
     .pause-card{text-align:center}
     .result-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:18px 0}
     .result-item{padding:13px;border-radius:14px;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.12)}
@@ -124,6 +127,7 @@
 </head>
 <body>
 <div id="app" class="app">
+  <button id="muteBtn" class="mute-btn" type="button" aria-label="サウンドのオン・オフ" title="サウンド">🔊</button>
   <div class="topbar">
     <div class="stat"><span>SCORE</span><strong id="score">0</strong></div>
     <div class="stat"><span>LINES</span><strong id="lines">0</strong></div>
@@ -301,7 +305,7 @@
     board = newBoard(); queue = []; holdPiece = null; current = null; canHold = true;
     state = "playing"; score = 0; lines = 0; level = 1; combo = 0; maxCombo = 0;
     particles = []; shake = 0; flash = 0; popup = ""; popupTime = 0; dropTimer = 0; lastTime = performance.now();
-    hideScreens(); app.className = "app playing"; refillQueue(); spawn(); updateUI(); playSfx("start");
+    hideScreens(); app.className = "app playing"; refillQueue(); spawn(); updateUI(); playSfx("start"); audio.startBgm();
     requestAnimationFrame(loop);
   }
   function hideScreens(){ Object.values(screens).forEach(s => s.classList.remove("active")); }
@@ -392,7 +396,7 @@
     updateUI();
   }
   function endGame(){
-    state = "over"; app.className = "app"; playSfx("over");
+    state = "over"; app.className = "app"; playSfx("over"); audio.stopBgm();
     const rank = getRank();
     ui.rScore.textContent = score.toLocaleString();
     ui.rLines.textContent = lines;
@@ -408,8 +412,8 @@
     return {grade:"C", name:"BEGINNER"};
   }
   function togglePause(){
-    if(state === "playing"){ state = "paused"; app.className = "app paused"; screens.pause.classList.add("active"); playSfx("pause"); }
-    else if(state === "paused"){ state = "playing"; app.className = "app playing"; screens.pause.classList.remove("active"); lastTime = performance.now(); requestAnimationFrame(loop); playSfx("start"); }
+    if(state === "playing"){ state = "paused"; app.className = "app paused"; screens.pause.classList.add("active"); playSfx("pause"); audio.pauseBgm(); }
+    else if(state === "paused"){ state = "playing"; app.className = "app playing"; screens.pause.classList.remove("active"); lastTime = performance.now(); requestAnimationFrame(loop); playSfx("start"); audio.startBgm(); }
   }
   function updateUI(){
     ui.score.textContent = score.toLocaleString(); ui.lines.textContent = lines; ui.level.textContent = level; ui.combo.textContent = combo;
@@ -495,17 +499,85 @@
     if(dropTimer >= dropInterval()){ dropTimer = 0; softDrop(); }
     stepParticles(dt); draw(); requestAnimationFrame(loop);
   }
+  // ===== Audio: ネオン調BGM(ループ) ＋ SFX（ミュート対応・著作権フリーの自前合成） =====
+  const audio = {
+    ctx:null, master:null, bgmGain:null, sfxGain:null,
+    muted:(()=>{ try{ return localStorage.getItem("ncs_muted")==="1"; }catch(e){ return false; } })(),
+    playing:false, timer:null, step:0, nextTime:0,
+    init(){
+      if(this.ctx) return;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AC();
+      this.master = this.ctx.createGain(); this.master.gain.value = this.muted ? 0 : 0.9; this.master.connect(this.ctx.destination);
+      this.bgmGain = this.ctx.createGain(); this.bgmGain.gain.value = 0; this.bgmGain.connect(this.master);
+      this.sfxGain = this.ctx.createGain(); this.sfxGain.gain.value = 1; this.sfxGain.connect(this.master);
+    },
+    resume(){ if(this.ctx && this.ctx.state === "suspended") this.ctx.resume(); },
+    setMuted(m){
+      this.muted = m; try{ localStorage.setItem("ncs_muted", m ? "1" : "0"); }catch(e){}
+      if(this.ctx) this.master.gain.setTargetAtTime(m ? 0 : 0.9, this.ctx.currentTime, 0.02);
+    },
+    voice(target, freq, t, dur, type, vol){
+      const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+      o.type = type; o.frequency.value = freq; o.connect(g); g.connect(target);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(vol, t + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0006, t + dur);
+      o.start(t); o.stop(t + dur + 0.04);
+    },
+    startBgm(){
+      this.init(); this.resume();
+      if(this.playing) return; this.playing = true;
+      this.step = 0; this.nextTime = this.ctx.currentTime + 0.08;
+      this.bgmGain.gain.setTargetAtTime(0.42, this.ctx.currentTime, 0.4);
+      clearInterval(this.timer); this.timer = setInterval(() => this.sched(), 25);
+    },
+    pauseBgm(){
+      if(this.ctx) this.bgmGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.12);
+      clearInterval(this.timer); this.timer = null; this.playing = false;
+    },
+    stopBgm(){ this.pauseBgm(); },
+    sched(){
+      if(!this.ctx) return; const ct = this.ctx.currentTime;
+      while(this.nextTime < ct + 0.14){ this.tick(this.step, this.nextTime); this.nextTime += 0.135; this.step++; }
+    },
+    tick(s, t){
+      const PROG = [[45,[69,72,76,72]],[41,[65,69,72,69]],[36,[60,64,67,64]],[43,[67,71,74,71]]];
+      const mtf = m => 440 * Math.pow(2, (m - 69) / 12);
+      const bar = Math.floor(s / 16) % 4, pos = s % 16, ch = PROG[bar], bass = ch[0], arp = ch[1];
+      if(pos === 0 || pos === 8) this.voice(this.bgmGain, mtf(bass), t, 0.55, "sawtooth", 0.5);
+      if(pos === 4 || pos === 12) this.voice(this.bgmGain, mtf(bass + 7), t, 0.22, "triangle", 0.24);
+      if(pos % 2 === 0){ const n = arp[(pos / 2) % arp.length]; this.voice(this.bgmGain, mtf(n + 12), t, 0.16, "square", 0.16); }
+      if(pos === 0) arp.forEach(n => this.voice(this.bgmGain, mtf(n), t, 1.95, "sine", 0.07));
+    }
+  };
   function playSfx(type){
     try{
-      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-      const now = audioCtx.currentTime, gain = audioCtx.createGain(); gain.connect(audioCtx.destination); gain.gain.value = .055;
-      const osc = audioCtx.createOscillator(); osc.connect(gain);
-      const freq = {move:260,rotate:520,drop:90,lock:150,clear:740,burst:110,hold:420,level:880,start:660,pause:260,over:80}[type] || 330;
-      osc.frequency.setValueAtTime(freq, now);
-      if(type==="burst" || type==="over") osc.frequency.exponentialRampToValueAtTime(44, now+.55);
-      else osc.frequency.exponentialRampToValueAtTime(freq*1.6, now+.12);
-      gain.gain.exponentialRampToValueAtTime(.001, now+(type==="burst"?.75:.18));
-      osc.type = type==="burst" ? "sawtooth" : "square"; osc.start(now); osc.stop(now+(type==="burst"?.78:.2));
+      audio.init(); audio.resume();
+      const ctx = audio.ctx, now = ctx.currentTime, V = audio.sfxGain;
+      const vc = (f, t, d, ty, vol) => audio.voice(V, f, t, d, ty, vol);
+      if(type === "clear"){            // 横一列消去：上昇するきらめき
+        [784, 988, 1319].forEach((f, i) => vc(f, now + i * 0.05, 0.20, "triangle", 0.24));
+        vc(1568, now + 0.13, 0.16, "sine", 0.16);
+        return;
+      }
+      if(type === "burst"){            // 4ライン同時消去：特大バースト
+        [392, 523, 659, 988].forEach((f, i) => vc(f, now + i * 0.045, 0.55, "sawtooth", 0.18));
+        const o = ctx.createOscillator(), g = ctx.createGain(); o.type = "sine"; o.connect(g); g.connect(V);
+        o.frequency.setValueAtTime(170, now); o.frequency.exponentialRampToValueAtTime(48, now + 0.6);
+        g.gain.setValueAtTime(0.3, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+        o.start(now); o.stop(now + 0.72);
+        [1175, 1568].forEach((f, i) => vc(f, now + 0.18 + i * 0.06, 0.22, "triangle", 0.14));
+        return;
+      }
+      const freq = {move:260,rotate:520,drop:90,lock:150,hold:420,level:880,start:660,pause:260,over:80}[type] || 330;
+      const o = ctx.createOscillator(), g = ctx.createGain(); o.connect(g); g.connect(V);
+      g.gain.setValueAtTime(0.1, now);
+      o.frequency.setValueAtTime(freq, now);
+      if(type === "over") o.frequency.exponentialRampToValueAtTime(44, now + 0.55);
+      else o.frequency.exponentialRampToValueAtTime(freq * 1.6, now + 0.12);
+      g.gain.exponentialRampToValueAtTime(0.001, now + (type === "over" ? 0.55 : 0.18));
+      o.type = "square"; o.start(now); o.stop(now + (type === "over" ? 0.6 : 0.2));
     }catch(e){}
   }
   function action(name){
@@ -547,6 +619,10 @@
   document.getElementById("startBtn").addEventListener("click", reset);
   document.getElementById("restartBtn").addEventListener("click", reset);
   document.getElementById("resumeBtn").addEventListener("click", togglePause);
+  const muteBtn = document.getElementById("muteBtn");
+  const syncMuteIcon = () => { muteBtn.textContent = audio.muted ? "🔇" : "🔊"; muteBtn.classList.toggle("off", audio.muted); };
+  syncMuteIcon();
+  muteBtn.addEventListener("click", () => { audio.init(); audio.resume(); audio.setMuted(!audio.muted); syncMuteIcon(); });
   document.getElementById("noteBtnStart").addEventListener("click", () => window.open(NOTE_URL, "_blank"));
   document.getElementById("noteBtnResult").addEventListener("click", () => window.open(NOTE_URL, "_blank"));
   document.getElementById("shareBtn").addEventListener("click", () => {
